@@ -41,7 +41,7 @@ function love.load()
 
     -- Properties panel
     PROPS_W = 200
-    PROPS_H = 260
+    PROPS_H = 300
     PROPS_X = WINDOW_W - PROPS_W - 10
     PROPS_Y = WINDOW_H - PROPS_W - 10
 
@@ -132,13 +132,16 @@ function love.draw()
     drawBody(ground)
 
     for _, obj in ipairs(bodies) do
-        if obj.selected then
-            love.graphics.setColor(1, 1, 0)
-        else
-            love.graphics.setColor(1, 1, 1)
-        end
+        -- Always draw real color
+        love.graphics.setColor(obj.color)
         drawBody(obj)
+
+        -- Draw outline if selected
+        if obj.selected then
+            drawSelectionOutline(obj)
+        end
     end
+
 
     -- Selection box
     if selecting then
@@ -460,6 +463,8 @@ function spawnBall(x, y, radius)
     obj.originalType = "dynamic"
     obj.fixture:setDensity(1.0)
     obj.body:resetMassData()
+
+    obj.color = {1, 1, 1}
     table.insert(bodies, obj)
 end
 
@@ -473,6 +478,8 @@ function spawnBox(x, y, w, h)
     obj.originalType = "dynamic"
     obj.fixture:setDensity(1.0)
     obj.body:resetMassData()
+
+    obj.color = {1, 1, 1}
     table.insert(bodies, obj)
 end
 
@@ -804,6 +811,50 @@ function drawPropertiesPanel()
 
     y = y + 30
 
+    -- ---------------------
+    -- Colors
+    -- ---------------------
+    love.graphics.print("Color: ", PROPS_X + 10, y)
+    -- Color preview box
+    love.graphics.setColor(obj.color)
+    love.graphics.rectangle("fill", PROPS_X + 60, y - 5, 20, 20)
+    love.graphics.setColor(1,1,1)
+    love.graphics.rectangle("line", PROPS_X + 60, y - 5, 20, 20)
+    y = y + 25
+    -- Red
+    love.graphics.print("R", PROPS_X + 60, y)
+    love.graphics.print(fmtColor(obj.color[1]), PROPS_X + 10, y)
+    drawButton("+", PROPS_X + 130, y, 20, 20, function ()
+        obj.color[1] = math.min(1, obj.color[1] + 0.1)
+    end)
+    drawButton("-", PROPS_X + 160, y, 20, 20, function ()
+        obj.color[1] = math.max(0, obj.color[1] - 0.1)
+    end)
+    y = y + 25
+
+    -- Green
+    love.graphics.print("G", PROPS_X + 60, y)
+    love.graphics.print(fmtColor(obj.color[2]), PROPS_X + 10, y)
+    drawButton("+", PROPS_X + 130, y, 20, 20, function ()
+        obj.color[2] = math.min(1, obj.color[2] + 0.1)
+    end)
+    drawButton("-", PROPS_X + 160, y, 20, 20, function ()
+        obj.color[2] = math.max(0, obj.color[2] - 0.1)
+    end)
+    y = y + 25
+
+    -- Blue
+    love.graphics.print("B", PROPS_X + 60, y)
+    love.graphics.print(fmtColor(obj.color[3]), PROPS_X + 10, y)
+    drawButton("+", PROPS_X + 130, y, 20, 20, function ()
+        obj.color[3] = math.min(1, obj.color[3] + 0.1)
+    end)
+    drawButton("-", PROPS_X + 160, y, 20, 20, function ()
+        obj.color[3] = math.max(0, obj.color[3] - 0.1)
+    end)
+    y = y + 30
+
+
     drawButton("Delete", PROPS_X + 80, y, 100, 20, function ()
         if obj then
             deleteObject(obj)
@@ -814,6 +865,9 @@ function drawPropertiesPanel()
     end, { theme = "danger" })
 end
 
+function fmtColor(v)
+    return string.format("%.2f", v)
+end
 
 function drawToolsPanel()
     ToolButtonY = WINDOW_H - 30
@@ -908,6 +962,58 @@ end
 function screenToWorld(x, y)
     return (x - camX) / camScale,
            (y - camY) / camScale
+end
+
+function drawSelectionOutline(obj)
+    local r, g, b = obj.color[1], obj.color[2], obj.color[3]
+
+    -- Perceived brightness for auto contrast
+    local brightness = 0.2126*r + 0.7152*g + 0.0722*b
+
+    local outlineColor
+    if brightness > 0.6 then
+        outlineColor = {0, 0, 0}   -- black glow for bright objects
+    else
+        outlineColor = {1, 1, 1}   -- white glow for dark objects
+    end
+
+    local body = obj.body
+    local shape = obj.shape
+
+    -- Glow passes (soft outer)
+    for i = 3, 1, -1 do
+        local alpha = 0.15 * i
+        love.graphics.setColor(outlineColor[1], outlineColor[2], outlineColor[3], alpha)
+        love.graphics.setLineWidth(4 + i * 2)
+
+        if shape:typeOf("CircleShape") then
+            local x, y = body:getPosition()
+            love.graphics.circle("line", x, y, shape:getRadius() + 2 + i*2)
+        else
+            love.graphics.polygon(
+                "line",
+                body:getWorldPoints(shape:getPoints())
+            )
+        end
+    end
+
+    -- Sharp inner outline
+    love.graphics.setColor(outlineColor)
+    love.graphics.setLineWidth(2)
+
+    if shape:typeOf("CircleShape") then
+        local x, y = body:getPosition()
+        love.graphics.circle("line", x, y, shape:getRadius() + 1)
+    else
+        love.graphics.polygon(
+            "line",
+            body:getWorldPoints(shape:getPoints())
+        )
+    end
+
+    -- Reset
+    love.graphics.setLineWidth(1)
+    love.graphics.setColor(1,1,1)
 end
 
 
