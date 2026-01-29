@@ -29,10 +29,15 @@ function love.load()
     TOOL_BOX    = 4
     TOOL_DRAG   = 5
     TOOL_FREEZE = 6
+    TOOL_MAGNET = 7
 
     currentTool = TOOL_SELECT
 
     dragForce = 10000
+
+    magnetStrength = 1500
+    magnetRadius = 150
+    magnetMode = "attract" -- or "repel"
 
     rotateSpeed = 15 * 10000
     originalRS = rotateSpeed
@@ -44,6 +49,15 @@ function love.load()
     PROPS_H = 300
     PROPS_X = WINDOW_W - PROPS_W - 10
     PROPS_Y = WINDOW_H - PROPS_H - 10
+
+    propsScroll = 0
+    PROPERTY_PANEL_W = 280
+    PROPERTY_ROW_H = 28
+    PROPS_SCROLL_SPEED = 30
+
+    hexColorInput = ""
+    hexColorActive = false
+    hexBoxX, hexBoxY, hexBoxW, hexBoxH = 0,0,0,0
 
     draggingGroup = false
     dragOffset = {}
@@ -103,7 +117,9 @@ function love.load()
 
     saveCache = {} -- { filename, meta }
 
+    buttonAnim = buttonAnim or {}
 
+    uiConsumedClick = false
 
     love.physics.setMeter(64)
     world = love.physics.newWorld(0, 9.81 * 64, true)
@@ -157,6 +173,37 @@ function love.update(dt)
             print("Auto-saved:", currentWorldName)
         end
     end
+
+    -- Magnet Tool
+    if currentTool == TOOL_MAGNET and love.mouse.isDown(1) then
+        local sx, sy = love.mouse.getPosition()
+        local mx, my = screenToWorld(sx, sy)
+
+        for _, obj in ipairs(bodies) do
+            local ox, oy = obj.body:getPosition()
+
+            local dx = mx - ox
+            local dy = my - oy
+            local dist = math.sqrt(dx*dx + dy*dy)
+
+            if dist > 1 and dist < magnetRadius then
+                local nx = dx / dist
+                local ny = dy / dist
+
+                local falloff = 1 - (dist / magnetRadius)
+
+                local force = magnetStrength * falloff
+
+                -- REPEL = flip direction
+                if magnetMode == "repel" then
+                    force = -force
+                end
+
+                obj.body:applyForce(nx * force, ny * force)
+            end
+        end
+    end
+
 end
 
 function love.resize(w, h)
@@ -206,6 +253,19 @@ function love.draw()
         end
     end
 
+    -- Magnet Tool
+    if currentTool == TOOL_MAGNET then
+        local sx, sy = love.mouse.getPosition()
+        local mx, my = screenToWorld(sx, sy)
+
+        love.graphics.setColor(0, 1, 1, 0.25)
+        love.graphics.circle("fill", mx, my, magnetRadius)
+
+        love.graphics.setColor(0, 1, 1, 0.8)
+        love.graphics.circle("line", mx, my, magnetRadius)
+
+        love.graphics.setColor(1,1,1,1)
+    end
 
     -- Selection box
     if selecting then
@@ -277,6 +337,7 @@ function love.draw()
 end
 
 function love.mousepressed(x, y, button)
+    uiConsumedClick = false
     -- Middle mouse = pan camera
     if button == 3 then
         panning = true
@@ -292,6 +353,7 @@ function love.mousepressed(x, y, button)
         if x >= btn.x and x <= btn.x + btn.w and
            y >= btn.y and y <= btn.y + btn.h then
             btn.onClick()
+            uiConsumedClick = true
             return
         end
     end
@@ -332,18 +394,22 @@ function love.mousepressed(x, y, button)
 
                 if lastClickedFile == file and (now - lastClickTime) <= DOUBLE_CLICK_TIME then
                     -- DOUBLE CLICK → LOAD
-                    loadWorld(SAVE_DIR .. file .. "/world.lua")
+                    local worldDir = getWorldDir(file)
+                    loadWorld(worldDir .. "world.lua")
+
                     currentWorldName = file
                     autoSaveTimer = 0
                     gameState = STATE_WORLD
 
                     lastClickedFile = nil
                     lastClickTime = 0
+                    uiConsumedClick = true
                     return
                 else
                     -- SINGLE CLICK (select row)
                     lastClickedFile = file
                     lastClickTime = now
+                    uiConsumedClick = true
                     return
                 end
             end
@@ -354,9 +420,22 @@ function love.mousepressed(x, y, button)
         lastClickTime = 0
     end
 
+    -- Hex color focus (SCREEN SPACE)
+    if x >= hexBoxX and x <= hexBoxX + hexBoxW and
+    y >= hexBoxY and y <= hexBoxY + hexBoxH then
+        hexColorActive = true
+        uiConsumedClick = true
+        return
+    else
+        hexColorActive = false
+    end
+
+    -- ⛔ UI CONSUMED = NO WORLD INPUT
+    if uiConsumedClick then
+        return
+    end
 
     local wx, wy = screenToWorld(x, y)
-
 
     if currentTool == TOOL_SELECT then
         local obj = getObjectAtPoint(wx, wy)
@@ -371,6 +450,9 @@ function love.mousepressed(x, y, button)
             selectStartX, selectStartY = wx, wy
             selectEndX, selectEndY = wx, wy
 
+            if uiConsumedClick then
+                return
+            end
             if not ctrl then
                 clearAllSelection()
             end
@@ -500,20 +582,62 @@ function love.wheelmoved(dx, dy)
         return
     end
 
-    -- WORLD ZOOM ONLY
     local mx, my = love.mouse.getPosition()
     local wx, wy = screenToWorld(mx, my)
 
+    local ctrl  = love.keyboard.isDown("lctrl", "rctrl")
+    local shift = love.keyboard.isDown("lshift", "rshift")
+    local alt   = love.keyboard.isDown("lalt", "ralt")
+
+    -- =========================
+    -- MAGNET TOOL MODIFIERS
+    -- =========================
+    if currentTool == TOOL_MAGNET then
+        local radiusStep   = 15
+        local strengthStep = 1000
+        local modeStep     = 1
+
+        if ctrl then
+            magnetRadius = magnetRadius + dy * radiusStep
+            magnetRadius = math.max(20, math.min(600, magnetRadius))
+            return
+        end
+
+        if shift then
+            magnetStrength = magnetStrength + dy * strengthStep
+            magnetStrength = math.max(0, math.min(80000, magnetStrength))
+            return
+        end
+
+        -- ALT scroll = toggle attract / repel
+        if alt then
+            if dy > 0 then
+                magnetMode = "attract"
+            else
+                magnetMode = "repel"
+            end
+            return
+        end
+    end
+
+    -- Properties panel scroll
+    local mx, my = love.mouse.getPosition()
+    if mx >= PROPS_X and mx <= PROPS_X + PROPS_W and
+    my >= PROPS_Y and my <= PROPS_Y + PROPS_H then
+        propsScroll = propsScroll + dy * PROPS_SCROLL_SPEED
+        return
+    end
+
+    -- =========================
+    -- WORLD ZOOM (DEFAULT)
+    -- =========================
     local oldScale = camScale
     camScale = math.max(ZOOM_MIN,
-               math.min(ZOOM_MAX, camScale + dy * ZOOM_SPEED))
-
-    local scaleFactor = camScale / oldScale
+            math.min(ZOOM_MAX, camScale + dy * ZOOM_SPEED))
 
     camX = mx - wx * camScale
     camY = my - wy * camScale
 end
-
 
 function love.keypressed(key)
     -- Reset Zoom
@@ -529,6 +653,7 @@ function love.keypressed(key)
     if key == "4" then currentTool = TOOL_BOX end
     if key == "5" then currentTool = TOOL_DRAG end
     if key == "6" then currentTool = TOOL_FREEZE end
+    if key == "7" then currentTool = TOOL_MAGNET end
 
     -- Remove Selected Objects
     if key == "delete" then
@@ -628,6 +753,13 @@ function love.keypressed(key)
             return
         end
     end
+
+    if hexColorActive then
+        if key == "backspace" then
+            hexColorInput = hexColorInput:sub(1, -2)
+        end
+    end
+
 end
 
 function love.keyreleased(key)
@@ -650,6 +782,13 @@ function love.textinput(t)
     if gameState == STATE_LOAD then
         loadSearch = loadSearch .. t
     end
+
+    if hexColorActive then
+        if #hexColorInput < 7 then
+            hexColorInput = hexColorInput .. t
+        end
+    end
+
 end
 
 -- =========================
@@ -760,8 +899,8 @@ end
 
 BUTTON_THEME = {
     normal = {
-        bg = {0.25, 0.25, 0.25},
-        hover = {0.35, 0.35, 0.35},
+        bg = {0.12,0.12,0.16},
+        hover = {0.22,0.22,0.26},
         border = {1,1,1},
         text = {1,1,1}
     },
@@ -814,272 +953,456 @@ function drawButton(text, x, y, w, h, onClick, style)
         textCol= BUTTON_THEME.disabled.text
     end
 
+    -- Button ID for animation
+    local id = tostring(x) .. ":" .. tostring(y) .. ":" .. text
+    buttonAnim[id] = buttonAnim[id] or 0
+
+    -- Smooth hover animation (lerp)
+    local target = hovered and 1 or 0
+    buttonAnim[id] = buttonAnim[id] + (target - buttonAnim[id]) * 0.2
+    local a = buttonAnim[id] -- 0..1
+
+    -- Slight grow on hover
+    local grow = 2 * a
+    local bx = x - grow
+    local by = y - grow
+    local bw = w + grow*2
+    local bh = h + grow*2
+
     table.insert(uiButtons, {
-        x=x,y=y,w=w,h=h,
+        x=bx,y=by,w=bw,h=bh,
         onClick = (isDisabled and nil or onClick)
     })
 
-    -- Background
-    if hovered then
-        love.graphics.setColor(hover)
-    else
-        love.graphics.setColor(bg)
+    -- Glow (behind button)
+    if hovered and not isDisabled then
+        love.graphics.setColor(hover[1], hover[2], hover[3], 0.25 * a)
+        love.graphics.rectangle("fill", bx-3, by-3, bw+6, bh+6, 6, 6)
     end
-    love.graphics.rectangle("fill", x, y, w, h)
+
+    -- Background
+    local mix = function(a,b,t) return a + (b-a)*t end
+    local col = {
+        mix(bg[1], hover[1], a),
+        mix(bg[2], hover[2], a),
+        mix(bg[3], hover[3], a)
+    }
+
+    love.graphics.setColor(col)
+    love.graphics.rectangle("fill", bx, by, bw, bh, 4, 4)
 
     -- Border
     love.graphics.setColor(border)
-    love.graphics.rectangle("line", x, y, w, h)
+    love.graphics.rectangle("line", bx, by, bw, bh, 4, 4)
 
-    -- Text (centered & pixel-perfect)
+    -- Text
     love.graphics.setColor(textCol)
-
     local font = love.graphics.getFont()
     local textW = font:getWidth(text)
     local textH = font:getHeight()
 
-    local textX = math.floor(x + (w - textW) / 2)
-    local textY = math.floor(y + (h - textH) / 2)
+    local textX = math.floor(bx + (bw - textW) / 2)
+    local textY = math.floor(by + (bh - textH) / 2)
 
     love.graphics.print(text, textX, textY)
+end
 
+function drawPanel(x, y, w, h)
+    -- Panel bg
+    love.graphics.setColor(0.08, 0.08, 0.11)
+    love.graphics.rectangle("fill", x, y, w, h, 6, 6)
+
+    -- Subtle border
+    love.graphics.setColor(1,1,1,0.1)
+    love.graphics.rectangle("line", x, y, w, h, 6, 6)
+end
+
+function drawSectionHeader(text, x, y, w)
+    love.graphics.setColor(1,1,1,0.9)
+    love.graphics.print(text, x, y)
+
+    love.graphics.setColor(1,1,1,0.15)
+    love.graphics.line(x, y + 18, x + w, y + 18)
+end
+
+function drawDividerSoft(x, y, w)
+    love.graphics.setColor(1,1,1,0.08)
+    love.graphics.line(x, y, x + w, y)
+end
+
+function getPrimarySelected()
+    if #selectedObjects > 0 then
+        return selectedObjects[1]
+    end
+    return nil
+end
+
+function drawPropertyRow(label, value, min, max, x, y, w)
+    local mx, my = love.mouse.getPosition()
+    local hovered = mx >= x and mx <= x + w and
+                    my >= y and my <= y + PROPERTY_ROW_H
+
+    -- Background
+    if hovered then
+        love.graphics.setColor(0.18, 0.18, 0.22)
+    else
+        love.graphics.setColor(0.12, 0.12, 0.16)
+    end
+    love.graphics.rectangle("fill", x, y, w, PROPERTY_ROW_H)
+
+    -- Value bar
+    local t = 0
+    if max > min then
+        t = (value - min) / (max - min)
+        t = math.max(0, math.min(1, t))
+    end
+
+    love.graphics.setColor(0.25, 0.45, 0.9, 0.6)
+    love.graphics.rectangle("fill", x, y + PROPERTY_ROW_H - 6, w * t, 6)
+
+    -- Text
+    love.graphics.setColor(1,1,1)
+    love.graphics.print(label, x + 8, y + 6)
+
+    local valueText = string.format("%.2f", value)
+    local tw = love.graphics.getFont():getWidth(valueText)
+    love.graphics.print(valueText, x + w - tw - 8, y + 6)
+end
+
+function isMultiSelected()
+    return #selectedObjects > 1
 end
 
 function drawPropertiesPanel()
-    love.graphics.setColor(0.15,0.15,0.15)
-    love.graphics.rectangle("fill", PROPS_X, PROPS_Y, PROPS_W, PROPS_H)
+    local x = PROPS_X
+    local y = PROPS_Y
+    local w = PROPS_W
+    local h = PROPS_H
+
+    -- Panel BG
+    love.graphics.setColor(0.10,0.10,0.14)
+    love.graphics.rectangle("fill", x, y, w, h, 6, 6)
+
+    -- Soft border
+    love.graphics.setColor(1,1,1,0.12)
+    love.graphics.rectangle("line", x, y, w, h, 6, 6)
+
+    -- Title
     love.graphics.setColor(1,1,1)
-    love.graphics.rectangle("line", PROPS_X, PROPS_Y, PROPS_W, PROPS_H)
+    love.graphics.print("Properties", x+12, y+8)
 
-    love.graphics.print("Properties", PROPS_X+10, PROPS_Y+5)
+    -- Subtle title underline
+    love.graphics.setColor(1,1,1,0.08)
+    love.graphics.line(x+10, y+26, x+w-10, y+26)
+    love.graphics.setColor(1,1,1,1)
 
-    -- Out of Limits Toggle
-    drawToggleButton("Out of Limits", PROPS_X+10, PROPS_Y-30, 180, 20, outLimits, function(v)
+
+    -- Out of Limits Toggle (NOT SCROLLING)
+    drawToggleButton("Out of Limits", x+10, y-30, 180, 22, outLimits, function(v)
         outLimits = v
     end)
 
     if #selectedObjects == 0 then
-        love.graphics.print("No selection", PROPS_X+10, PROPS_Y+30)
+        love.graphics.setColor(1,1,1,0.7)
+        love.graphics.print("No selection", x+10, y+40)
+        love.graphics.setColor(1,1,1,1)
         return
     end
 
-    -- MULTI
+    -- =====================
+    -- SCROLL CLIP AREA
+    -- =====================
+    local clipY = y + 30
+    local clipH = h - 40
+
+    love.graphics.setScissor(x, clipY, w, clipH)
+
+    local cy = clipY + 10 + propsScroll
+
+    -- Helpers
+    local function drawSection(title)
+        love.graphics.setColor(1,1,1,0.9)
+        love.graphics.print(title, x+10, cy)
+        love.graphics.setColor(1,1,1,0.15)
+        love.graphics.line(x+10, cy+18, x+w-10, cy+18)
+        love.graphics.setColor(1,1,1,1)
+        cy = cy + 26
+    end
+
+    local function drawDivider()
+        love.graphics.setColor(1,1,1,0.08)
+        love.graphics.rectangle("fill", x+10, cy, w-20, 1)
+        love.graphics.setColor(1,1,1,1)
+        cy = cy + 12
+    end
+
+    local function forAllSelected(fn)
+        for _, obj in ipairs(selectedObjects) do
+            fn(obj)
+        end
+    end
+
+    -- MULTI INFO
     if #selectedObjects > 1 then
-        love.graphics.print("Selected: " .. #selectedObjects, PROPS_X+10, PROPS_Y+30)
+        love.graphics.setColor(1,1,1,0.75)
+        love.graphics.print("Selected: "..#selectedObjects, x+10, cy)
+        love.graphics.setColor(1,1,1,1)
+        cy = cy + 20
+    end
 
-        local y = PROPS_Y + 60
+    -- =====================
+    -- STATE
+    -- =====================
+    drawSection("State")
 
-        drawButton("Freeze All", PROPS_X+10, y, 140, 20, function()
-            for _, obj in ipairs(selectedObjects) do
-                obj.frozen = true
+    local anyFrozen = selectedObjects[1].frozen == true
+
+    drawToggleButton("Frozen", x+15, cy, w-30, 22, anyFrozen, function(v)
+        forAllSelected(function(obj)
+            obj.frozen = v
+            if v then
                 obj.body:setType("static")
                 obj.originalType = "static"
                 obj.body:setLinearVelocity(0,0)
                 obj.body:setAngularVelocity(0)
-            end
-        end)
-
-        y = y + 30
-
-        drawButton("Unfreeze All", PROPS_X+10, y, 140, 20, function()
-            for _, obj in ipairs(selectedObjects) do
-                obj.frozen = false
+            else
                 obj.body:setType("dynamic")
                 obj.originalType = "dynamic"
             end
         end)
+    end)
 
-        y = y + 40
+    cy = cy + 32
+    drawDivider()
 
-        drawButton("Bounce +", PROPS_X+10, y, 65, 20, function()
-            for _, obj in ipairs(selectedObjects) do
-                local r = obj.fixture:getRestitution()
-                local new = r + 0.1
-                if not outLimits then new = math.min(1, new) end
-                obj.fixture:setRestitution(new)
-            end
+    -- =====================
+    -- PHYSICS
+    -- =====================
+    drawSection("Physics")
+
+    local function drawStepper(label, getter, setter, step, minVal, maxVal)
+        -- Row background
+        love.graphics.setColor(0.11, 0.11, 0.15)
+        love.graphics.rectangle("fill", x+10, cy-2, w-20, 26, 4, 4)
+        love.graphics.setColor(1,1,1)
+
+        -- LIVE VALUE (from first selected)
+        local liveValue = getter(selectedObjects[1])
+        local valueText = string.format("%.2f", liveValue)
+
+        -- Label
+        love.graphics.setColor(1,1,1)
+        love.graphics.print(label, x+15, cy)
+
+        -- Live number (right side)
+        local vw = love.graphics.getFont():getWidth(valueText)
+        love.graphics.setColor(0.8, 0.9, 1)
+        love.graphics.print(valueText, x+w-100-vw, cy)
+
+        love.graphics.setColor(1,1,1)
+
+        -- Minus
+        drawButton("-", x+w-90, cy, 22, 22, function()
+            forAllSelected(function(obj)
+                local v = getter(obj) - step
+                if not outLimits and minVal then v = math.max(minVal, v) end
+                setter(obj, v)
+            end)
         end)
 
-        drawButton("Bounce -", PROPS_X+85, y, 65, 20, function()
-            for _, obj in ipairs(selectedObjects) do
-                local r = obj.fixture:getRestitution()
-                local new = r - 0.1
-                if not outLimits then new = math.max(0, new) end
-                obj.fixture:setRestitution(new)
-            end
+        -- Plus
+        drawButton("+", x+w-60, cy, 22, 22, function()
+            forAllSelected(function(obj)
+                local v = getter(obj) + step
+                if not outLimits and maxVal then v = math.min(maxVal, v) end
+                setter(obj, v)
+            end)
         end)
 
-        y = y + 30
-
-        drawButton("Fric +", PROPS_X+10, y, 65, 20, function()
-            for _, obj in ipairs(selectedObjects) do
-                local f = obj.fixture:getFriction()
-                local new = f + 0.1
-                if not outLimits then new = math.min(1, new) end
-                obj.fixture:setFriction(new)
-            end
-        end)
-
-        drawButton("Fric -", PROPS_X+85, y, 65, 20, function()
-            for _, obj in ipairs(selectedObjects) do
-                local f = obj.fixture:getFriction()
-                local new = f - 0.1
-                if not outLimits then new = math.max(0, new) end
-                obj.fixture:setFriction(new)
-            end
-        end)
-
-        y = y + 30
-
-        drawButton("Mass +", PROPS_X + 10, y, 65, 20, function ()
-            for _, obj in ipairs(selectedObjects) do
-                local d = obj.fixture:getDensity()
-                local new = d + 0.2
-                if not outLimits then new = math.max(0.1, new) end
-                setObjectDensity(obj, new)
-            end
-        end)
-
-        drawButton("Mass -", PROPS_X + 85, y, 65, 20, function ()
-            for _, obj in ipairs(selectedObjects) do
-                local d = obj.fixture:getDensity()
-                local new = d - 0.2
-                if not outLimits then new = math.max(0.1, new) end
-                setObjectDensity(obj, new)
-            end
-        end)
-
-        y = y + 30
-
-        drawButton("Delete ALL", PROPS_X + 10, y, 140, 20, function ()
-            deleteSelectedObjects()
-        end, { theme = "danger" })
-
-        return
+        cy = cy + 28
     end
 
-    -- SINGLE
-    local obj = selectedObjects[1]
-    local fixture = obj.fixture
-    local y = PROPS_Y + 30
 
-    love.graphics.print("Frozen: " .. tostring(obj.frozen == true), PROPS_X+10, y)
-    drawButton("Toggle", PROPS_X+110, y, 80, 20, function()
-        toggleFreeze(obj)
-    end)
+    drawStepper("Bounce",
+        function(o) return o.fixture:getRestitution() end,
+        function(o,v) o.fixture:setRestitution(v) end,
+        0.1, 0, 1)
 
-    y = y + 30
+    drawStepper("Friction",
+        function(o) return o.fixture:getFriction() end,
+        function(o,v) o.fixture:setFriction(v) end,
+        0.1, 0, 1)
 
-    local rest = fixture:getRestitution()
-    love.graphics.print(string.format("Bounce: %.2f", rest), PROPS_X+10, y)
+    drawStepper("Density",
+        function(o) return o.fixture:getDensity() end,
+        function(o,v) setObjectDensity(o,v) end,
+        0.2, 0.1, nil)
 
-    drawButton("-", PROPS_X+130, y, 20, 20, function()
-        local new = rest - 0.1
-        new = math.max(0, new)
-        fixture:setRestitution(new)
-    end)
+    cy = cy + 10
+    drawDivider()
 
-    drawButton("+", PROPS_X+160, y, 20, 20, function()
-        local new = rest + 0.1
-        if not outLimits then new = math.min(1, new) end
-        fixture:setRestitution(new)
-    end)
+    -- =====================
+    -- COLOR
+    -- =====================
+    drawSection("Color")
 
-    y = y + 30
+    local ref = selectedObjects[1]
 
-    local fric = fixture:getFriction()
-    love.graphics.print(string.format("Friction: %.2f", fric), PROPS_X+10, y)
+    if not hexColorActive then
+        hexColorInput = rgb01ToHex(ref.color[1], ref.color[2], ref.color[3])
+    end
 
-    drawButton("-", PROPS_X+130, y, 20, 20, function()
-        local new = fric - 0.1
-        new = math.max(0, new)
-        fixture:setFriction(new)
-    end)
-
-    drawButton("+", PROPS_X+160, y, 20, 20, function()
-        local new = fric + 0.1
-        if not outLimits then new = math.min(1, new) end
-        fixture:setFriction(new)
-    end)
-
-    y = y + 30
-
-    local density = fixture:getDensity()
-    love.graphics.print(string.format("Density: %.2f", density), PROPS_X + 10, y)
-
-    drawButton("-", PROPS_X + 130, y, 20, 20, function ()
-        local new = density - 0.2
-        new = math.max(0.1, new)
-        setObjectDensity(obj, new)
-    end)
-
-    drawButton("+", PROPS_X + 160, y, 20, 20, function ()
-        local new = density + 0.2
-        if not outLimits then new = math.max(0.1, new) end
-        setObjectDensity(obj, new)
-    end)
-
-    y = y + 30
-
-    -- ---------------------
-    -- Colors
-    -- ---------------------
-    love.graphics.print("Color: ", PROPS_X + 10, y)
-    -- Color preview box
-    love.graphics.setColor(obj.color)
-    love.graphics.rectangle("fill", PROPS_X + 60, y - 5, 20, 20)
+    love.graphics.setColor(ref.color)
+    love.graphics.rectangle("fill", x+15, cy, 26, 26)
     love.graphics.setColor(1,1,1)
-    love.graphics.rectangle("line", PROPS_X + 60, y - 5, 20, 20)
-    y = y + 25
-    -- Red
-    love.graphics.print("R", PROPS_X + 60, y)
-    love.graphics.print(fmtColor(obj.color[1]), PROPS_X + 10, y)
-    drawButton("+", PROPS_X + 130, y, 20, 20, function ()
-        obj.color[1] = math.min(1, obj.color[1] + 0.1)
-    end)
-    drawButton("-", PROPS_X + 160, y, 20, 20, function ()
-        obj.color[1] = math.max(0, obj.color[1] - 0.1)
-    end)
-    y = y + 25
+    love.graphics.rectangle("line", x+15, cy, 26, 26)
 
-    -- Green
-    love.graphics.print("G", PROPS_X + 60, y)
-    love.graphics.print(fmtColor(obj.color[2]), PROPS_X + 10, y)
-    drawButton("+", PROPS_X + 130, y, 20, 20, function ()
-        obj.color[2] = math.min(1, obj.color[2] + 0.1)
-    end)
-    drawButton("-", PROPS_X + 160, y, 20, 20, function ()
-        obj.color[2] = math.max(0, obj.color[2] - 0.1)
-    end)
-    y = y + 25
+    cy = cy + 36
 
-    -- Blue
-    love.graphics.print("B", PROPS_X + 60, y)
-    love.graphics.print(fmtColor(obj.color[3]), PROPS_X + 10, y)
-    drawButton("+", PROPS_X + 130, y, 20, 20, function ()
-        obj.color[3] = math.min(1, obj.color[3] + 0.1)
-    end)
-    drawButton("-", PROPS_X + 160, y, 20, 20, function ()
-        obj.color[3] = math.max(0, obj.color[3] - 0.1)
-    end)
-    y = y + 30
+    local function adjustColor(i, delta)
+        forAllSelected(function(obj)
+            obj.color[i] = math.max(0, math.min(1, obj.color[i] + delta))
+        end)
+    end
+
+    local labels = {"R","G","B"}
+    for i=1,3 do
+        love.graphics.print(labels[i], x+15, cy)
+        love.graphics.print(fmtColor(ref.color[i]), x+50, cy)
+
+        drawButton("-", x+w-120, cy, 22, 22, function()
+            adjustColor(i, -0.05)
+        end)
+
+        drawButton("+", x+w-90, cy, 22, 22, function()
+            adjustColor(i, 0.05)
+        end)
+
+        cy = cy + 28
+    end
+
+    cy = cy + 10
+    drawDivider()
+    cy = cy + 6
+
+    -- =====================
+    -- HEX COLOR INPUT
+    -- =====================
+    love.graphics.setColor(1,1,1,0.8)
+    love.graphics.print("Hex Color", x+15, cy)
+
+    local boxX = x + 15
+    local boxY = cy + 20
+    local boxW = w - 30
+    local boxH = 26
+    hexBoxX = boxX
+    hexBoxY = boxY
+    hexBoxW = boxW
+    hexBoxH = boxH
 
 
-    drawButton("Delete", PROPS_X + 80, y, 100, 20, function ()
-        if obj then
-            deleteObject(obj)
-            removeObjectFromList(obj)
-            clearSelectionOf(obj)
-            obj = nil
+    local mx, my = love.mouse.getPosition()
+    local hovered = mx >= boxX and mx <= boxX + boxW and
+                    my >= boxY and my <= boxY + boxH
+
+    -- Box bg
+    if hovered or hexColorActive then
+        love.graphics.setColor(0.18,0.18,0.25)
+    else
+        love.graphics.setColor(0.12,0.12,0.16)
+    end
+    love.graphics.rectangle("fill", boxX, boxY, boxW, boxH, 4, 4)
+
+    -- Border
+    love.graphics.setColor(1,1,1,0.15)
+    love.graphics.rectangle("line", boxX, boxY, boxW, boxH, 4, 4)
+
+    -- Text
+    love.graphics.setColor(1,1,1)
+    local displayText = hexColorInput
+    if hexColorActive then
+        displayText = displayText .. "_"
+    end
+    love.graphics.print(displayText, boxX + 8, boxY + 6)
+
+    -- Apply button
+    drawButton("Apply", boxX + boxW - 70, boxY, 60, boxH, function()
+        local r,g,b = hexToRGB01(hexColorInput)
+        if r then
+            for _, obj in ipairs(selectedObjects) do
+                obj.color[1] = r
+                obj.color[2] = g
+                obj.color[3] = b
+            end
         end
+    end)
+
+    cy = cy + 60
+
+
+    -- =====================
+    -- DANGER
+    -- =====================
+    drawSection("Danger Zone")
+
+    drawButton("Delete Selected", x+15, cy, w-30, 28, function()
+        deleteSelectedObjects()
     end, { theme = "danger" })
+
+    cy = cy + 40
+
+    -- =====================
+    -- END SCROLL CONTENT
+    -- =====================
+    love.graphics.setScissor()
+
+    -- =====================
+    -- SCROLL LIMITS + BAR
+    -- =====================
+    local contentHeight = cy - (clipY + propsScroll)
+    local maxScroll = math.max(0, contentHeight - clipH)
+
+    propsScroll = math.min(0, math.max(-maxScroll, propsScroll))
+
+    -- Scrollbar
+    if contentHeight > clipH then
+        local barH = clipH * (clipH / contentHeight)
+        local t = -propsScroll / maxScroll
+        local barY = clipY + t * (clipH - barH)
+
+        love.graphics.setColor(1,1,1,0.2)
+        love.graphics.rectangle("fill", x+w-6, barY, 4, barH)
+        love.graphics.setColor(1,1,1,1)
+    end
 end
 
 function fmtColor(v)
     return string.format("%.2f", v)
 end
 
+function rgb01ToHex(r,g,b)
+    return string.format("#%02X%02X%02X",
+        math.floor(r*255),
+        math.floor(g*255),
+        math.floor(b*255)
+    )
+end
+
+function hexToRGB01(hex)
+    hex = hex:gsub("#","")
+    if #hex ~= 6 then return nil end
+
+    local r = tonumber(hex:sub(1,2), 16)
+    local g = tonumber(hex:sub(3,4), 16)
+    local b = tonumber(hex:sub(5,6), 16)
+
+    if not r or not g or not b then return nil end
+
+    return r/255, g/255, b/255
+end
+
 function drawToolsPanel()
+    -- Tools
     ToolButtonY = WINDOW_H - 30
 
     addToolButton("Select", 10, ToolButtonY, TOOL_SELECT, function ()
@@ -1105,6 +1428,23 @@ function drawToolsPanel()
     addToolButton("Freeze", 360, ToolButtonY, TOOL_FREEZE, function ()
         currentTool = TOOL_FREEZE
     end)
+
+    addToolButton("Magnet", 430, ToolButtonY, TOOL_MAGNET, function ()
+        currentTool = TOOL_MAGNET
+    end)
+
+    -- Tool Properties
+    ToolPropY = ToolButtonY - 30
+
+    if currentTool == TOOL_MAGNET then
+        love.graphics.print("Strength: " .. string.format("%.2f", magnetStrength), 10, ToolPropY - 20)
+        love.graphics.print("Radius: " .. string.format("%.2f", magnetRadius), 10, ToolPropY)
+        love.graphics.print("Mode: " .. magnetMode, 10, ToolPropY - 40)
+    end
+
+    if currentTool == TOOL_DRAG then
+        love.graphics.print("Drag: " .. dragForce, 10, ToolPropY)
+    end
 end
 
 function addToolButton(text, x, y, toolId, onClick)
@@ -1238,7 +1578,8 @@ function drawUI()
         [TOOL_BALL] = "Spawn Ball",
         [TOOL_BOX] = "Spawn Box",
         [TOOL_DRAG] = "Drag",
-        [TOOL_FREEZE] = "Freeze"
+        [TOOL_FREEZE] = "Freeze",
+        [TOOL_MAGNET] = "Magnet"
     }
 
     love.graphics.setColor(1, 1, 1)
@@ -1279,69 +1620,116 @@ function drawMainMenu()
     love.graphics.setBackgroundColor(0.05, 0.05, 0.08)
 
     local cx = WINDOW_W / 2
-    local y = 200
+    local cy = WINDOW_H / 2
+
+    -- ===== Main Card Panel =====
+    local panelW = 420
+    local panelH = 420
+    local panelX = cx - panelW / 2
+    local panelY = cy - panelH / 2
+
+    love.graphics.setColor(0.12, 0.12, 0.16)
+    love.graphics.rectangle("fill", panelX, panelY, panelW, panelH, 8, 8)
 
     love.graphics.setColor(1,1,1)
-    love.graphics.printf("PHYSICS PLAYGROUND", 0, 100, WINDOW_W, "center")
+    love.graphics.rectangle("line", panelX, panelY, panelW, panelH, 8, 8)
 
-    drawButton("New World", cx - 100, y, 200, 40, function()
+    -- ===== Title =====
+    love.graphics.setColor(1,1,1)
+    love.graphics.printf("PHYSICS PLAYGROUND", panelX, panelY + 40, panelW, "center")
+
+    -- Subtitle
+    love.graphics.setColor(0.7, 0.7, 0.9)
+    love.graphics.printf("Sandbox Physics Simulator", panelX, panelY + 70, panelW, "center")
+
+    -- Divider
+    love.graphics.setColor(1,1,1,0.2)
+    love.graphics.line(panelX + 40, panelY + 110, panelX + panelW - 40, panelY + 110)
+
+    -- ===== Buttons =====
+    local btnW = 240
+    local btnH = 44
+    local btnX = cx - btnW / 2
+    local y = panelY + 150
+
+    drawButton("New World", btnX, y, btnW, btnH, function()
         resetWorld()
         currentWorldName = nil
         autoSaveTimer = 0
         gameState = STATE_WORLD
     end)
 
-    y = y + 60
+    y = y + 65
 
-    drawButton("Load World", cx - 100, y, 200, 40, function()
+    drawButton("Load World", btnX, y, btnW, btnH, function()
         refreshSaveCache()
         loadSearch = ""
         loadMenuScroll = 0
         gameState = STATE_LOAD
     end)
 
-    y = y + 60
+    y = y + 65
 
-    drawButton("Quit", cx - 100, y, 200, 40, function()
+    drawButton("Quit", btnX, y, btnW, btnH, function()
         love.event.quit()
-    end)
+    end, { theme = "danger" })
+
+    -- ===== Footer / Credits =====
+    love.graphics.setColor(0.6, 0.6, 0.6)
+    love.graphics.printf("Owner: Galaxy", panelX, panelY + panelH - 60, panelW, "center")
+
+    love.graphics.setColor(0.5, 0.5, 0.5)
+    love.graphics.printf("Thanks to Rick for the ideas!", panelX, panelY + panelH - 40, panelW, "center")
+
+    -- Version / Build tag (feels pro)
+    love.graphics.setColor(0.4, 0.4, 0.4)
+    love.graphics.print("v0.8", panelX + 10, panelY + panelH - 20)
 end
 
 function drawLoadMenu()
-    local panelW = math.floor(WINDOW_W * 0.6)
-    local panelH = math.floor(WINDOW_H * 0.7)
+    local panelW = math.floor(WINDOW_W * 0.65)
+    local panelH = math.floor(WINDOW_H * 0.75)
     local panelX = math.floor((WINDOW_W - panelW) / 2)
     local panelY = math.floor((WINDOW_H - panelH) / 2)
 
-    -- Panel BG
-    love.graphics.setColor(0.12, 0.12, 0.12)
-    love.graphics.rectangle("fill", panelX, panelY, panelW, panelH)
+    -- ===== Background Dim =====
+    love.graphics.setColor(0,0,0,0.4)
+    love.graphics.rectangle("fill", 0,0, WINDOW_W, WINDOW_H)
+
+    -- ===== Main Panel =====
+    love.graphics.setColor(0.12, 0.12, 0.16)
+    love.graphics.rectangle("fill", panelX, panelY, panelW, panelH, 8, 8)
     love.graphics.setColor(1,1,1)
-    love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
+    love.graphics.rectangle("line", panelX, panelY, panelW, panelH, 8, 8)
 
-    -- Title
-    local title = "Load World"
-    local font = love.graphics.getFont()
-    local titleW = font:getWidth(title)
-    local titleX = math.floor(panelX + (panelW - titleW) / 2)
-    local titleY = math.floor(panelY - 20)
+    -- ===== Title =====
+    love.graphics.setColor(1,1,1)
+    love.graphics.printf("Load World", panelX, panelY + 20, panelW, "center")
 
-    love.graphics.print(title, titleX, titleY)
+    love.graphics.setColor(0.7,0.7,0.9)
+    love.graphics.printf("Double-click a world to load", panelX, panelY + 45, panelW, "center")
 
+    -- Divider
+    love.graphics.setColor(1,1,1,0.2)
+    love.graphics.line(panelX + 30, panelY + 75, panelX + panelW - 30, panelY + 75)
 
-    -- Search bar
-    love.graphics.print("Search:", panelX + 120, panelY + 15)
-    love.graphics.rectangle("line", panelX + 180, panelY + 12, 200, 24)
-    love.graphics.print(loadSearch .. "_", panelX + 185, panelY + 16)
-
-
-    -- Back Button
-    drawButton("Back", panelX + 10, panelY + 10, 80, 28, function()
+    -- ===== Back Button =====
+    drawButton("Back", panelX + 20, panelY + 20, 80, 28, function()
         gameState = STATE_MENU
     end)
 
-    local filtered = {}
+    -- ===== Search Bar =====
+    local searchY = panelY + 90
+    love.graphics.setColor(1,1,1)
+    love.graphics.print("Search:", panelX + 30, searchY)
 
+    local searchX = panelX + 100
+    local searchW = 260
+    love.graphics.rectangle("line", searchX, searchY - 4, searchW, 26)
+    love.graphics.print(loadSearch .. "_", searchX + 6, searchY)
+
+    -- ===== Filter Saves =====
+    local filtered = {}
     for _, entry in ipairs(saveCache) do
         local name = entry.file:lower()
         if loadSearch == "" or name:find(loadSearch:lower(), 1, true) then
@@ -1349,9 +1737,13 @@ function drawLoadMenu()
         end
     end
 
-
-    local totalH = #filtered * LOAD_ROW_HEIGHT
-    local viewH = panelH - 120
+    -- ===== Scrolling =====
+    local listX = panelX + 30
+    local listY = panelY + 140
+    local listW = panelW - 60
+    local rowH  = LOAD_ROW_HEIGHT
+    local viewH = panelH - 180
+    local totalH = #filtered * rowH
 
     if totalH < viewH then
         loadMenuScroll = 0
@@ -1359,32 +1751,59 @@ function drawLoadMenu()
         loadMenuScroll = math.max(viewH - totalH, math.min(0, loadMenuScroll))
     end
 
-    local listX = panelX + 20
-    local listY = panelY + 60
-    local listW = panelW - 40
-    local rowH = 30
+    -- ===== List Background =====
+    love.graphics.setColor(0.08, 0.08, 0.11)
+    love.graphics.rectangle("fill", listX, listY, listW, viewH, 6, 6)
+    love.graphics.setColor(1,1,1,0.15)
+    love.graphics.rectangle("line", listX, listY, listW, viewH, 6, 6)
 
+    -- ===== Draw Rows =====
     for i, entry in ipairs(filtered) do
         local file = entry.file
         local meta = entry.meta
+
         local x = listX
-        local y = listY + (i-1) * LOAD_ROW_HEIGHT + loadMenuScroll
+        local y = listY + (i-1) * rowH + loadMenuScroll
         local w = listW
         local h = rowH
 
+        local clicked = false
+        
+        drawButton("", x, y, w, h, function()
+            -- DOUBLE CLICK LOGIC
+            if lastClickWorld == file and (love.timer.getTime() - lastClickTime) < 0.4 then
+                local worldDir = getWorldDir(file)
+                loadWorld(worldDir .. "world.lua")
+                currentWorldName = file
+                autoSaveTimer = 0
+                gameState = STATE_WORLD
+            end
+            
+            lastClickWorld = file
+            lastClickTime = love.timer.getTime()
+        end)
+        
         local mx, my = love.mouse.getPosition()
         local hovered = mx >= x and mx <= x+w and my >= y and my <= y+h
 
-        if y + rowH >= listY and y <= listY + viewH then
-            -- Row hover
+        if y + h >= listY and y <= listY + viewH then
+            -- Row BG
             if hovered then
-                love.graphics.setColor(0.22, 0.22, 0.22)
-                love.graphics.rectangle("fill", x, y, w, h)
+                love.graphics.setColor(0.22, 0.22, 0.28)
+            else
+                love.graphics.setColor(0.16, 0.16, 0.20)
             end
+            love.graphics.rectangle("fill", x, y, w, h)
 
+            -- Border
+            love.graphics.setColor(1,1,1,0.08)
+            love.graphics.rectangle("line", x, y, w, h)
+
+            -- Name
             love.graphics.setColor(1,1,1)
-            love.graphics.print(meta.name or file, x + 8, y + 4)
+            love.graphics.print(meta.name or file, x + 10, y + 4)
 
+            -- Meta Info
             local info = string.format(
                 "Objects: %d   Modified: %s",
                 meta.objectCount or 0,
@@ -1392,20 +1811,21 @@ function drawLoadMenu()
             )
 
             love.graphics.setColor(0.7,0.7,0.7)
-            love.graphics.print(info, x + 8, y + 16)
-            love.graphics.setColor(1,1,1)
+            love.graphics.print(info, x + 10, y + 18)
 
-            -- Delete button on hover
+            -- Delete Button (on hover)
             if hovered then
-                drawButton("Delete", x + w - 70, y, 70, h, function()
+                drawButton("Delete", x + w - 80, y + 4, 70, h - 8, function()
                     deleteWorld(file)
                 end, { theme = "danger" })
             end
         end
     end
 
+    -- ===== Empty State =====
     if #filtered == 0 then
-        love.graphics.print("No saves found.", listX, listY)
+        love.graphics.setColor(0.7,0.7,0.7)
+        love.graphics.printf("No saves found.", listX, listY + viewH/2 - 10, listW, "center")
     end
 end
 
